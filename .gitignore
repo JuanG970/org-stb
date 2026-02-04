@@ -1,0 +1,8 @@
+*.elc
+*~
+\#*\#
+.\#*
+.DS_Store
+*.swp
+*.swo
+.dir-locals.el
