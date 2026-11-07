@@ -22,6 +22,17 @@
             "* TODO Task B\nSCHEDULED: <2026-02-04 Wed 14:00>\n"
             "* TODO Task C\nSCHEDULED: <2026-02-04 Wed 16:30>\n")))
 
+(defun org-stb-test--write-mixed-fixture (file)
+  "Write a fixture mixing SCHEDULED, DEADLINE, and timestamp-less entries to FILE.
+The deadline-only entry comes first: org 9.6 drops a DEADLINE from the
+day agenda when a SCHEDULED entry precedes it in the file."
+  (with-temp-file file
+    (insert "* TODO DeadlineOnly\nDEADLINE: <2026-02-04 Wed 15:00>\n"
+            "* TODO ScheduledTask\nSCHEDULED: <2026-02-04 Wed 10:00>\n"
+            "* TODO BothTimestamps\nSCHEDULED: <2026-02-04 Wed 09:00>\n"
+            "DEADLINE: <2026-02-05 Thu 17:00>\n"
+            "* TODO NoTimestamp\n")))
+
 (defun org-stb-test--cleanup (file)
   "Kill fixture buffers and delete FILE."
   (let ((agenda (get-buffer "*Org Agenda*"))
@@ -30,17 +41,39 @@
     (when (buffer-live-p org-buffer) (kill-buffer org-buffer))
     (when (file-exists-p file) (delete-file file))))
 
-(defmacro org-stb-test--with-agenda (&rest body)
-  "Run BODY in a fresh agenda buffer built from a temporary org file.
+(defmacro org-stb-test--with-agenda-from (fixture-function &rest body)
+  "Run BODY in an agenda buffer built from a file written by FIXTURE-FUNCTION.
 The fixture path is available as `org-stb-test--file'."
-  (declare (indent 0) (debug t))
+  (declare (indent 1) (debug t))
   `(let* ((org-stb-test--file (make-temp-file "org-stb-test-" nil ".org"))
           (org-agenda-files (list org-stb-test--file))
           (org-agenda-span 1))
      (unwind-protect
          (progn
-           (org-stb-test--write-fixture org-stb-test--file)
+           (funcall ,fixture-function org-stb-test--file)
            (org-agenda-list nil "2026-02-04" 1)
+           (with-current-buffer "*Org Agenda*"
+             (goto-char (point-min))
+             ,@body))
+       (org-stb-test--cleanup org-stb-test--file))))
+
+(defmacro org-stb-test--with-agenda (&rest body)
+  "Run BODY in a fresh agenda buffer built from a temporary org file.
+The fixture path is available as `org-stb-test--file'."
+  (declare (indent 0) (debug t))
+  `(org-stb-test--with-agenda-from #'org-stb-test--write-fixture ,@body))
+
+(defmacro org-stb-test--with-todo-list (fixture-function &rest body)
+  "Run BODY in a TODO list built from a file written by FIXTURE-FUNCTION.
+Useful for entries that carry no agenda timestamp.  The fixture path
+is available as `org-stb-test--file'."
+  (declare (indent 1) (debug t))
+  `(let* ((org-stb-test--file (make-temp-file "org-stb-test-" nil ".org"))
+          (org-agenda-files (list org-stb-test--file)))
+     (unwind-protect
+         (progn
+           (funcall ,fixture-function org-stb-test--file)
+           (org-todo-list "*")
            (with-current-buffer "*Org Agenda*"
              (goto-char (point-min))
              ,@body))
@@ -59,8 +92,8 @@ The fixture path is available as `org-stb-test--file'."
   "Get the SCHEDULED timestamp at current entry."
   (org-entry-get nil "SCHEDULED"))
 
-(defun org-stb-test--entry-text (file heading)
-  "Return the heading and SCHEDULED lines for HEADING in FILE."
+(defun org-stb-test--entry-text (file heading &optional lines)
+  "Return the first LINES lines (default 2) of entry HEADING in FILE."
   (with-current-buffer (find-file-noselect file)
     (goto-char (point-min))
     (unless (re-search-forward
@@ -68,7 +101,7 @@ The fixture path is available as `org-stb-test--file'."
       (error "Heading %s not found in %s" heading file))
     (buffer-substring-no-properties
      (line-beginning-position)
-     (progn (forward-line 2) (point)))))
+     (progn (forward-line (or lines 2)) (point)))))
 
 ;;; Behavioral tests
 
@@ -113,6 +146,38 @@ The fixture path is available as `org-stb-test--file'."
                    "* TODO Task B\nSCHEDULED: <2026-02-04 Wed 14:30>\n"))
     (should (equal (org-stb-test--entry-text org-stb-test--file "Task C")
                    "* TODO Task C\nSCHEDULED: <2026-02-04 Wed 17:00>\n"))))
+
+(ert-deftest org-stb-test-shift-deadline-only-item ()
+  "A deadline-only agenda line shifts its DEADLINE timestamp."
+  (org-stb-test--with-agenda-from #'org-stb-test--write-mixed-fixture
+    (org-stb-test--goto-agenda-line "DeadlineOnly")
+    (org-stb-shift-1-hour)
+    (should (equal (org-stb-test--entry-text org-stb-test--file "DeadlineOnly")
+                   "* TODO DeadlineOnly\nDEADLINE: <2026-02-04 Wed 16:00>\n"))
+    (should (equal (org-stb-test--entry-text org-stb-test--file "ScheduledTask")
+                   "* TODO ScheduledTask\nSCHEDULED: <2026-02-04 Wed 10:00>\n"))))
+
+(ert-deftest org-stb-test-shift-prefers-scheduled-over-deadline ()
+  "When both timestamps exist, only SCHEDULED moves."
+  (org-stb-test--with-todo-list #'org-stb-test--write-mixed-fixture
+    (org-stb-test--goto-agenda-line "BothTimestamps")
+    (org-stb-shift-30-min)
+    (should (equal (org-stb-test--entry-text org-stb-test--file
+                                            "BothTimestamps" 3)
+                   (concat "* TODO BothTimestamps\n"
+                           "SCHEDULED: <2026-02-04 Wed 09:30>\n"
+                           "DEADLINE: <2026-02-05 Thu 17:00>\n")))))
+
+(ert-deftest org-stb-test-shift-untimestamped-item-signals-user-error ()
+  "An entry with no planning timestamp signals a readable `user-error'."
+  (org-stb-test--with-todo-list #'org-stb-test--write-mixed-fixture
+    (org-stb-test--goto-agenda-line "NoTimestamp")
+    (let ((error-data (should-error (org-stb-shift-time 30)
+                                    :type 'user-error)))
+      (should (string-match-p "SCHEDULED or DEADLINE"
+                              (error-message-string error-data))))
+    (should (equal (org-stb-test--entry-text org-stb-test--file "NoTimestamp" 1)
+                   "* TODO NoTimestamp\n"))))
 
 (ert-deftest org-stb-test-shift-outside-agenda-signals-user-error ()
   "Calling the shifter outside an agenda line signals `user-error'."

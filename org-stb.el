@@ -35,18 +35,58 @@
 
 ;;; Core Functions
 
+(defconst org-stb--planning-properties '("SCHEDULED" "DEADLINE")
+  "Planning properties `org-stb-shift-time' can shift, in priority order.")
+
+(defun org-stb--entry-timestamp ()
+  "Return the planning timestamp of the current entry.
+The value is a cons (PROPERTY . TIMESTAMP), choosing the first
+property from `org-stb--planning-properties' that is set.  Return
+nil when the entry carries none of them."
+  (catch 'found
+    (dolist (property org-stb--planning-properties)
+      (let ((value (org-entry-get nil property)))
+        (when value
+          (throw 'found (cons property value)))))))
+
+(defun org-stb--goto-planning-timestamp (property)
+  "Move point onto the timestamp of PROPERTY in the current entry.
+Signal `user-error' when the planning line cannot be located."
+  (org-back-to-heading t)
+  (let ((end (save-excursion (org-end-of-subtree t))))
+    (unless (re-search-forward
+             (concat "^[ \t]*" property ":[ \t]*"
+                     "\\(<[^>\n]+>\\|\\[[^]\n]+\\]\\)")
+             end t)
+      (user-error "Cannot locate the %s timestamp of this entry" property))
+    (goto-char (match-beginning 1))))
+
+(defun org-stb--shift-entry (minutes)
+  "Shift the planning timestamp of the entry at point by MINUTES.
+The timestamp under point wins; otherwise the SCHEDULED timestamp is
+used, falling back to DEADLINE.  Signal `user-error' when the entry
+has no planning timestamp at all."
+  (if (org-at-timestamp-p 'lax)
+      (org-timestamp-change minutes 'minute)
+    (let ((planning (or (org-stb--entry-timestamp)
+                        (user-error
+                         "Entry has no SCHEDULED or DEADLINE timestamp"))))
+      (org-stb--goto-planning-timestamp (car planning))
+      (org-timestamp-change minutes 'minute))))
+
 (defun org-stb-shift-time (minutes)
   "Shift the current agenda item by MINUTES.
-Positive values shift forward, negative values shift backward."
+Positive values shift forward, negative values shift backward.
+The timestamp the agenda line points at is shifted; when the line
+points at the heading instead, SCHEDULED is used and DEADLINE is the
+fallback.  Signal `user-error' when the entry has neither."
   (interactive "nShift by minutes: ")
   (let ((marker (or (org-get-at-bol 'org-marker)
                     (user-error "No item at point"))))
     (org-with-point-at marker
-      (let* ((timestamp (org-entry-get nil "SCHEDULED"))
-             (new-time (when timestamp
-                        (org-timestamp-change minutes 'minute))))
-        (when new-time
-          (org-agenda-redo))))))
+      (org-stb--shift-entry minutes))
+    (when (derived-mode-p 'org-agenda-mode)
+      (org-agenda-redo))))
 
 (defun org-stb-shift-hours (hours)
   "Shift the current agenda item by HOURS.
@@ -60,7 +100,8 @@ Positive values shift forward, negative values shift backward."
   (org-stb-shift-time org-stb-default-increment))
 
 (defun org-stb-shift-all-forward (minutes)
-  "Shift all scheduled items in the current agenda forward by MINUTES."
+  "Shift all timestamped items in the current agenda forward by MINUTES.
+Items without a SCHEDULED or DEADLINE timestamp are skipped."
   (interactive "nShift all items by minutes: ")
   (save-excursion
     (goto-char (point-min))
@@ -68,8 +109,8 @@ Positive values shift forward, negative values shift backward."
       (while (not (eobp))
         (when (org-get-at-bol 'org-marker)
           (condition-case nil
-              (progn
-                (org-stb-shift-time minutes)
+              (org-with-point-at (org-get-at-bol 'org-marker)
+                (org-stb--shift-entry minutes)
                 (setq count (1+ count)))
             (error nil)))
         (forward-line 1))

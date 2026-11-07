@@ -14,6 +14,7 @@ A lightweight Emacs package for rescheduling org-agenda items with ease.
 ### Current (v0.1.0)
 
 - ✅ Shift individual items by any time amount (minutes/hours)
+- ✅ Shift `DEADLINE` when an item has no `SCHEDULED`, with a clear error when it has neither
 - ✅ Shift all scheduled items in chain
 - ✅ Predefined quick actions (1 hour, 30 min)
 - ✅ Customizable time increments
